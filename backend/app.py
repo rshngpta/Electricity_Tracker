@@ -61,6 +61,19 @@ if USE_SNS:
         print(f"SNS initialization failed: {e}. Notifications disabled.")
         USE_SNS = False
 
+# Lambda Service (optional - only if USE_LAMBDA is enabled)
+USE_LAMBDA = os.getenv('USE_LAMBDA', 'false').lower() == 'true'
+lambda_service = None
+
+if USE_LAMBDA:
+    try:
+        from backend.lib.lambda_service import LambdaService
+        lambda_service = LambdaService()
+        print("Lambda service enabled")
+    except Exception as e:
+        print(f"Lambda initialization failed: {e}.")
+        USE_LAMBDA = False
+
 # -------------------------
 # FLASK INITIALIZATION
 # -------------------------
@@ -379,6 +392,48 @@ def sns_spike_alert():
         "spikes_found": len(spikes),
         "alerts_sent": alerts_sent
     })
+
+# -------------------------
+# LAMBDA ENDPOINTS
+# -------------------------
+
+# Lambda Status endpoint
+@app.route("/lambda/status", methods=["GET"])
+def lambda_status():
+    return jsonify({
+        "lambda_enabled": USE_LAMBDA,
+        "service_available": lambda_service is not None
+    })
+
+# List Lambda functions
+@app.route("/lambda/functions", methods=["GET"])
+def list_lambda_functions():
+    if not USE_LAMBDA or not lambda_service:
+        return jsonify({"error": "Lambda not enabled"}), 400
+    
+    functions = lambda_service.list_functions()
+    function_names = [f['FunctionName'] for f in functions]
+    return jsonify({"functions": function_names, "count": len(functions)})
+
+# Invoke Lambda function
+@app.route("/lambda/invoke", methods=["POST"])
+def invoke_lambda():
+    if not USE_LAMBDA or not lambda_service:
+        return jsonify({"error": "Lambda not enabled"}), 400
+    
+    data = request.get_json()
+    if not data or not data.get("function_name"):
+        return jsonify({"error": "function_name required"}), 400
+    
+    function_name = data["function_name"]
+    payload = data.get("payload", {})
+    
+    result = lambda_service.invoke_function(function_name, payload)
+    
+    if result:
+        return jsonify({"result": result})
+    else:
+        return jsonify({"error": "Failed to invoke function"}), 500
 
 # -------------------------
 # RUN SERVER

@@ -1,0 +1,164 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Electricity Tracker - Lambda Functions
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, prod]
+  
+  DynamoDBTableName:
+    Type: String
+    Default: ElectricityReadings
+  
+  S3BucketName:
+    Type: String
+    Default: electricity-tracker-uploads-24196517
+  
+  SNSTopicArn:
+    Type: String
+    Default: arn:aws:sns:us-east-1:904013368830:ElectricityAlerts
+
+Globals:
+  Function:
+    Runtime: python3.11
+    Timeout: 30
+    MemorySize: 256
+    Environment:
+      Variables:
+        DYNAMODB_TABLE_NAME: !Ref DynamoDBTableName
+        S3_BUCKET_NAME: !Ref S3BucketName
+        SNS_TOPIC_ARN: !Ref SNSTopicArn
+        ENVIRONMENT: !Ref Environment
+
+Resources:
+  # API Gateway
+  ElectricityApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub electricity-tracker-api-${Environment}
+      StageName: !Ref Environment
+      Cors:
+        AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
+        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key'"
+        AllowOrigin: "'*'"
+
+  # Lambda Function: Process S3 Upload
+  ProcessUploadFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub electricity-process-upload-${Environment}
+      CodeUri: ../backend/lambda_handlers/
+      Handler: process_upload.lambda_handler
+      Description: Process CSV files uploaded to S3
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Ref S3BucketName
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DynamoDBTableName
+      Events:
+        S3Upload:
+          Type: S3
+          Properties:
+            Bucket: !Ref UploadBucket
+            Events: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: suffix
+                    Value: .csv
+
+  # S3 Bucket for uploads (if not exists)
+  UploadBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref S3BucketName
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders: ['*']
+            AllowedMethods: [GET, PUT, POST]
+            AllowedOrigins: ['*']
+
+  # Lambda Function: Get Usage
+  GetUsageFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub electricity-get-usage-${Environment}
+      CodeUri: ../backend/lambda_handlers/
+      Handler: get_usage.lambda_handler
+      Description: Get electricity usage data
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref DynamoDBTableName
+      Events:
+        GetUsage:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ElectricityApi
+            Path: /usage
+            Method: GET
+
+  # Lambda Function: Estimate Bill
+  EstimateBillFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub electricity-estimate-bill-${Environment}
+      CodeUri: ../backend/lambda_handlers/
+      Handler: estimate_bill.lambda_handler
+      Description: Estimate electricity bill
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref DynamoDBTableName
+      Events:
+        EstimateBill:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ElectricityApi
+            Path: /estimate
+            Method: GET
+
+  # Lambda Function: Send Alert
+  SendAlertFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub electricity-send-alert-${Environment}
+      CodeUri: ../backend/lambda_handlers/
+      Handler: send_alert.lambda_handler
+      Description: Send usage alerts via SNS
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref DynamoDBTableName
+        - SNSPublishMessagePolicy:
+            TopicName: !Select [5, !Split [":", !Ref SNSTopicArn]]
+      Events:
+        SendAlert:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ElectricityApi
+            Path: /alert
+            Method: POST
+
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub "https://${ElectricityApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}"
+    Export:
+      Name: !Sub ${AWS::StackName}-ApiEndpoint
+
+  ProcessUploadFunctionArn:
+    Description: Process Upload Lambda Function ARN
+    Value: !GetAtt ProcessUploadFunction.Arn
+
+  GetUsageFunctionArn:
+    Description: Get Usage Lambda Function ARN
+    Value: !GetAtt GetUsageFunction.Arn
+
+  EstimateBillFunctionArn:
+    Description: Estimate Bill Lambda Function ARN
+    Value: !GetAtt EstimateBillFunction.Arn
+
+  SendAlertFunctionArn:
+    Description: Send Alert Lambda Function ARN
+    Value: !GetAtt SendAlertFunction.Arn
+
