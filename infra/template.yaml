@@ -1,0 +1,254 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Electricity Consumption Tracker - Cloud Application
+
+Globals:
+  Function:
+    Runtime: python3.13
+    Timeout: 30
+    MemorySize: 256
+    Environment:
+      Variables:
+        CONSUMPTION_TABLE: !Ref ConsumptionTable
+        METERS_TABLE: !Ref MetersTable
+        ALERTS_TABLE: !Ref AlertsTable
+        SNS_TOPIC_ARN: !Ref AlertTopic
+
+Resources:
+  # ============================================================================
+  # S3 BUCKET - Static Website Hosting
+  # ============================================================================
+  WebsiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'electricity-tracker-${AWS::AccountId}'
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: error.html
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      CorsConfiguration:
+        CorsRules:
+          - AllowedOrigins:
+              - '*'
+            AllowedMethods:
+              - GET
+              - HEAD
+            AllowedHeaders:
+              - '*'
+
+  WebsiteBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WebsiteBucket
+      PolicyDocument:
+        Statement:
+          - Sid: PublicReadGetObject
+            Effect: Allow
+            Principal: '*'
+            Action: 's3:GetObject'
+            Resource: !Sub '${WebsiteBucket.Arn}/*'
+
+  # ============================================================================
+  # DYNAMODB TABLES
+  # ============================================================================
+  ConsumptionTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: ElectricityConsumption
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: meterIdDate
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: N
+        - AttributeName: meterId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: meterIdDate
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: MeterIdIndex
+          KeySchema:
+            - AttributeName: meterId
+              KeyType: HASH
+            - AttributeName: timestamp
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+
+  MetersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: ElectricityMeters
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: meterId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: meterId
+          KeyType: HASH
+
+  AlertsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: ElectricityAlerts
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: meterId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: meterId
+          KeyType: HASH
+
+  # ============================================================================
+  # SNS TOPICS
+  # ============================================================================
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: ElectricityAlerts
+      DisplayName: Electricity Consumption Alerts
+
+  WeeklyReportTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: ElectricityWeeklyReports
+      DisplayName: Weekly Consumption Reports
+
+  # ============================================================================
+  # API GATEWAY
+  # ============================================================================
+  ElectricityApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: prod
+      Cors:
+        AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
+        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+        AllowOrigin: "'*'"
+
+  # ============================================================================
+  # LAMBDA FUNCTIONS
+  # ============================================================================
+  
+  # 1. Consumption Handler - Submit readings
+  ConsumptionHandlerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: ElectricityConsumptionHandler
+      CodeUri: ../src/lambda_functions/consumption_handler/
+      Handler: app.lambda_handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ConsumptionTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref MetersTable
+      Events:
+        SubmitReading:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ElectricityApi
+            Path: /consumption
+            Method: POST
+        GetReadings:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ElectricityApi
+            Path: /consumption
+            Method: GET
+
+  # 2. Analytics Engine - Calculate statistics
+  AnalyticsEngineFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: ElectricityAnalyticsEngine
+      CodeUri: ../src/lambda_functions/analytics_engine/
+      Handler: app.lambda_handler
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ConsumptionTable
+      Events:
+        GetAnalytics:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ElectricityApi
+            Path: /analytics
+            Method: GET
+
+  # 3. Report Generator - Create reports
+  ReportGeneratorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: ElectricityReportGenerator
+      CodeUri: ../src/lambda_functions/report_generator/
+      Handler: app.lambda_handler
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ConsumptionTable
+        - S3CrudPolicy:
+            BucketName: !Ref WebsiteBucket
+      Events:
+        GenerateReport:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ElectricityApi
+            Path: /report
+            Method: POST
+
+  # 4. Notification Manager - Send alerts
+  NotificationManagerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: ElectricityNotificationManager
+      CodeUri: ../src/lambda_functions/notification_manager/
+      Handler: app.lambda_handler
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref AlertsTable
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt AlertTopic.TopicName
+      Events:
+        DynamoDBStream:
+          Type: DynamoDB
+          Properties:
+            Stream: !GetAtt ConsumptionTable.StreamArn
+            StartingPosition: LATEST
+            BatchSize: 10
+
+# ============================================================================
+# OUTPUTS
+# ============================================================================
+Outputs:
+  WebsiteURL:
+    Description: "Static Website URL"
+    Value: !GetAtt WebsiteBucket.WebsiteURL
+    Export:
+      Name: ElectricityTrackerWebsiteURL
+
+  ApiEndpoint:
+    Description: "API Gateway Endpoint URL"
+    Value: !Sub "https://${ElectricityApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
+    Export:
+      Name: ElectricityTrackerApiEndpoint
+
+  AlertTopicArn:
+    Description: "SNS Topic ARN for Alerts"
+    Value: !Ref AlertTopic
+    Export:
+      Name: ElectricityTrackerAlertTopicArn
+
+  ConsumptionTableName:
+    Description: "DynamoDB Consumption Table Name"
+    Value: !Ref ConsumptionTable
+
+  WebsiteBucketName:
+    Description: "S3 Website Bucket Name"
+    Value: !Ref WebsiteBucket
