@@ -221,9 +221,14 @@ def load_readings_for_device(device_id: str):
         
         # Convert each dictionary to a MeterReading object
         for r in readings_data:
-            # Parse the ISO timestamp string to a datetime object
-            # Replace 'Z' (Zulu time) with '+00:00' for proper parsing
-            ts = datetime.fromisoformat(r["timestamp"].replace("Z", "+00:00"))
+            try:
+                # Parse the ISO timestamp string to a datetime object
+                # Remove any suffix like "_0" we added for uniqueness
+                ts_str = r["timestamp"].split("_")[0].replace("Z", "+00:00")
+                ts = datetime.fromisoformat(ts_str)
+            except:
+                # If parsing fails, use current time
+                ts = datetime.now()
             readings.append(MeterReading(
                 device_id=r["device_id"],
                 timestamp=ts,
@@ -327,14 +332,16 @@ def upload():
     if USE_DYNAMODB and dynamodb_service:
         # OPTION 1: Store in DynamoDB (cloud database)
         # Convert MeterReading objects to dictionaries for DynamoDB
-        readings_data = [
-            {
+        # Use current timestamp (unique for each reading)
+        readings_data = []
+        for i, r in enumerate(readings):
+            # Create unique timestamp for each reading
+            unique_time = datetime.now().isoformat() + f"_{i}"
+            readings_data.append({
                 "device_id": r.device_id,
-                "timestamp": r.timestamp.isoformat(),
+                "timestamp": unique_time,  # Unique timestamp for DynamoDB key
                 "kwh": r.kwh
-            }
-            for r in readings
-        ]
+            })
         # Batch write to DynamoDB (efficient for multiple items)
         dynamodb_count = dynamodb_service.put_readings_batch(readings_data)
     else:
@@ -368,6 +375,41 @@ def upload():
     # Add DynamoDB count if using DynamoDB
     if USE_DYNAMODB:
         response["dynamodb_count"] = dynamodb_count
+    
+    # ==========================================================
+    # HIGH USAGE ALERT - Send SNS notification if kWh > 4400
+    # ==========================================================
+    HIGH_USAGE_THRESHOLD = 4400  # kWh threshold for alert
+    
+    # Check if any reading exceeds the threshold
+    for r in readings:
+        if r.kwh > HIGH_USAGE_THRESHOLD:
+            # Send SNS alert if SNS is enabled
+            if USE_SNS and sns_service:
+                try:
+                    alert_message = f"""
+⚠️ HIGH ELECTRICITY USAGE ALERT ⚠️
+
+Device ID: {r.device_id}
+Usage: {r.kwh} kWh
+Threshold: {HIGH_USAGE_THRESHOLD} kWh
+
+Your electricity consumption has exceeded the safe limit!
+Please check your appliances and reduce usage if possible.
+
+- Smart Electricity Tracker
+"""
+                    sns_service.send_alert(
+                        subject="⚠️ HIGH USAGE ALERT - Electricity Tracker",
+                        message=alert_message
+                    )
+                    response["alert_sent"] = True
+                    response["alert_reason"] = f"Usage {r.kwh} kWh exceeds threshold {HIGH_USAGE_THRESHOLD} kWh"
+                    print(f"SNS Alert sent for high usage: {r.kwh} kWh")
+                except Exception as e:
+                    print(f"Failed to send SNS alert: {e}")
+                    response["alert_error"] = str(e)
+            break  # Only send one alert per upload
     
     # Return 202 Accepted (processing complete)
     return jsonify(response), 202
@@ -424,6 +466,70 @@ def usage():
         "device_id": device_id,
         "period": period,
         "data": data_list
+    })
+
+
+@app.route("/readings", methods=["GET"])
+def get_readings():
+    """
+    Get raw electricity readings for a device with created_at date.
+    
+    This endpoint returns individual readings instead of aggregated data,
+    showing when each reading was created in the system.
+    
+    Query Parameters:
+        device_id (required): The device ID to get readings for
+    
+    Returns:
+        JSON with device_id and list of readings with created_at
+    
+    Example Request:
+        GET /readings?device_id=meter-home-1
+    
+    Example Response:
+        {
+            "device_id": "meter-home-1",
+            "readings": [
+                {"kwh": 1.5, "created_at": "2025-11-30T16:05:49"}
+            ]
+        }
+    """
+    # Get the device_id from query parameters
+    device_id = request.args.get("device_id")
+    
+    # Validate required parameter
+    if not device_id:
+        return jsonify({"error": "device_id required"}), 400
+    
+    readings_data = []
+    
+    # Check DynamoDB first (if enabled)
+    if USE_DYNAMODB and dynamodb_service:
+        try:
+            # Query DynamoDB for readings
+            items = dynamodb_service.get_readings_for_device(device_id)
+            for item in items:
+                readings_data.append({
+                    "kwh": float(item.get("kwh", 0)),
+                    "created_at": item.get("created_at", "N/A")
+                })
+        except Exception as e:
+            print(f"DynamoDB query failed: {e}")
+    
+    # Fallback to local file if no DynamoDB data
+    if not readings_data and READINGS_FILE.exists():
+        with READINGS_FILE.open("r", encoding="utf-8") as f:
+            for line in f:
+                obj = json.loads(line)
+                if obj.get("device_id") == device_id:
+                    readings_data.append({
+                        "kwh": float(obj.get("kwh", 0)),
+                        "created_at": obj.get("timestamp", "N/A")
+                    })
+    
+    return jsonify({
+        "device_id": device_id,
+        "readings": readings_data
     })
 
 

@@ -339,7 +339,8 @@ class DynamoDBService:
                 readings.append({
                     'device_id': item['device_id'],
                     'timestamp': item['timestamp'],
-                    'kwh': float(item['kwh'])  # Convert Decimal back to float
+                    'kwh': float(item['kwh']),  # Convert Decimal back to float
+                    'created_at': item.get('created_at', '')  # Include created_at field
                 })
             
             # Handle pagination if there are more results
@@ -353,7 +354,8 @@ class DynamoDBService:
                     readings.append({
                         'device_id': item['device_id'],
                         'timestamp': item['timestamp'],
-                        'kwh': float(item['kwh'])
+                        'kwh': float(item['kwh']),
+                        'created_at': item.get('created_at', '')  # Include created_at field
                     })
             
             return readings

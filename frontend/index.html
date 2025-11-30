@@ -27,13 +27,13 @@
     <div class="section">
       <h3>View Usage / Estimate</h3>
       <div>
-        <label>Device ID: <input type="text" id="deviceId" value="device-001" /></label>
+        <label>Device ID: <input type="text" id="deviceId" value="meter-home-1" /></label>
       </div>
 
       <div style="margin-top:8px;">
         <button id="viewUsage">Get Usage</button>
         <button id="getEstimate">Estimate Bill</button>
-        <input id="rateInput" type="number" step="0.01" value="0.20" style="width:100px" /> EUR/kWh
+        <input id="rateInput" type="number" step="0.01" value="0.36" style="width:100px" /> EUR/kWh
       </div>
 
       <div id="usageResult" style="margin-top:12px;"></div>
@@ -68,14 +68,14 @@
         }
       });
 
-      // Usage display
+      // Usage display - shows readings with created date only
       document.getElementById('viewUsage').addEventListener('click', async () => {
         const deviceId = document.getElementById('deviceId').value;
         if (!deviceId) {
           document.getElementById('usageResult').textContent = "Device ID required.";
           return;
         }
-        let url = `/usage?device_id=${encodeURIComponent(deviceId)}&period=day`;
+        let url = `/readings?device_id=${encodeURIComponent(deviceId)}`;
         document.getElementById('usageResult').textContent = "Loading usage...";
         try {
           const res = await fetch(url);
@@ -84,14 +84,16 @@
             document.getElementById('usageResult').textContent = "Error: " + (json.error || JSON.stringify(json));
             return;
           }
-          const data = json.data || [];
+          const data = json.readings || [];
           if (!data.length) {
             document.getElementById('usageResult').innerHTML = "<i>No data</i>";
             return;
           }
-          let html = "<table><tr><th>Period</th><th>Total kWh</th></tr>";
+          let html = "<table><tr><th>Created Date</th><th>kWh</th></tr>";
           for (const row of data) {
-            html += `<tr><td>${row.period}</td><td>${row.total_kwh}</td></tr>`;
+            // Format date nicely (just date part)
+            const createdDate = row.created_at ? row.created_at.split('T')[0] : 'N/A';
+            html += `<tr><td>${createdDate}</td><td>${row.kwh}</td></tr>`;
           }
           html += "</table>";
           document.getElementById('usageResult').innerHTML = html;
@@ -108,7 +110,7 @@
           document.getElementById('estimateResult').textContent = "Device ID required.";
           return;
         }
-        const url = `/estimate?device_id=${encodeURIComponent(deviceId)}&period=day&rate=${encodeURIComponent(rate)}`;
+        const url = `/estimate?device_id=${encodeURIComponent(deviceId)}&rate=${encodeURIComponent(rate)}`;
         document.getElementById('estimateResult').textContent = "Calculating...";
         try {
           const res = await fetch(url);
